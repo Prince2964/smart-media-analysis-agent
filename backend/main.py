@@ -2,6 +2,7 @@ import asyncio
 import io
 import os
 from .config import load_backend_env
+from .auth import key_mode
 from time import perf_counter
 from contextlib import asynccontextmanager, contextmanager
 from uuid import uuid4, UUID
@@ -61,7 +62,8 @@ async def lifespan(app):
         storage.close()
         storage = None
     if search_store:
-        search_store.credential.close()
+        if search_store.credential:
+            search_store.credential.close()
         search_store = None
 
 app = FastAPI(title='Smart Media Analysis Agent — local mock API', lifespan=lifespan)
@@ -172,8 +174,8 @@ def get_document(job_id: str):
 @app.get('/api/health')
 def health():
     return {'mode': os.getenv('PROCESSING_MODE', 'mock'), 'azure_connected': storage is not None or search_store is not None,
-            'agent': 'foundry-agent' if os.getenv('FOUNDRY_AGENT_NAME') else 'local-fixture',
-            'agent_configured': bool(os.getenv('FOUNDRY_AGENT_NAME')),
+            'agent': 'azure-openai' if key_mode() else 'foundry-agent' if os.getenv('FOUNDRY_AGENT_NAME') else 'local-fixture',
+            'agent_configured': bool(os.getenv('REPORT_MODEL_KEY')) if key_mode() else bool(os.getenv('FOUNDRY_AGENT_NAME')),
             'storage': 'azure' if storage else 'discard', 'blob_access_verified': storage_verified}
 
 @app.get('/api/reports')
@@ -302,7 +304,7 @@ def ask(job_id: str, request: Question):
         raise HTTPException(422, 'Enter a question.')
     document = get_document(job_id)
     if not document.is_mock:
-        if not search_store or not os.getenv('FOUNDRY_AGENT_NAME'):
+        if not search_store or not (os.getenv('REPORT_MODEL_KEY') if key_mode() else os.getenv('FOUNDRY_AGENT_NAME')):
             raise HTTPException(409, 'Media chat is not configured on this server.')
         try:
             if document.metadata.get('search_provider') != 'azure-ai-search':

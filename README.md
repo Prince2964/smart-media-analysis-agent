@@ -2,6 +2,32 @@
 
 An Azure-powered media analysis project for AI-103. Upload a video or image, or provide a supported public video link, to produce a concise report and ask questions with evidence citations.
 
+## API-key migration branch
+
+API-key mode is now active on the development laptop. Live checks passed for Storage upload/read/delete, AI Search access, generated-image extraction, report formatting, question resolution, cited model answers and web search. These checks do not establish that every video format will analyze successfully.
+
+This branch adds `AZURE_AUTH_MODE=api-key`. Set these private backend/.env values:
+
+```dotenv
+AZURE_AUTH_MODE=api-key
+AZURE_STORAGE_CONNECTION_STRING=
+CONTENT_UNDERSTANDING_KEY=
+REPORT_MODEL_KEY=
+AZURE_SEARCH_KEY=
+```
+
+Keep the existing endpoints, container, index and model deployment settings.
+Key mode uses direct Azure OpenAI for media answers and its Responses API Web Search
+for external answers; it does not call saved Foundry agents. No tenant/client IDs
+or Azure CLI login are used at runtime in this mode. Azure resource settings must
+allow key authentication, and firewall rules still apply. Network access, quotas,
+and secret validity can differ on another laptop.
+
+Rollback: the `foundry-before-api-keys` Git tag preserves the Foundry implementation.
+The private original `.env` is backed up locally under
+`.local/backups/foundry-before-api-keys/backend.env` (not on GitHub).
+Restore that code and private configuration to return to the previous setup.
+
 ## Current status
 
 The React frontend and FastAPI backend run locally. Analysis, storage, retrieval, model calls and optional web search use Azure online services. This is not an offline AI model and is not yet a publicly hosted website.

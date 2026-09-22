@@ -26,3 +26,14 @@ def test_cli_and_managed_identity_selection(monkeypatch):
     monkeypatch.delenv('AZURE_CLIENT_ID', raising=False)
     monkeypatch.setattr(auth, 'ManagedIdentityCredential', lambda **kw: kw)
     assert auth.get_credential() == {}
+
+
+def test_api_key_mode_never_uses_identity(monkeypatch):
+    monkeypatch.setenv('AZURE_AUTH_MODE', 'api-key')
+    monkeypatch.setenv('REPORT_MODEL_KEY', 'test-key')
+    def forbidden():
+        raise AssertionError('Identity credentials must not be used')
+    assert auth.service_headers('REPORT_MODEL_KEY', '', forbidden) == {'api-key': 'test-key'}
+    monkeypatch.delenv('REPORT_MODEL_KEY')
+    with pytest.raises(ValueError, match='REPORT_MODEL_KEY'):
+        auth.service_headers('REPORT_MODEL_KEY', '', forbidden)

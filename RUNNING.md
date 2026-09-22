@@ -1,3 +1,6 @@
+# API-key branch
+See the API-key migration section in README.md. API-key mode is active on this laptop. Storage upload/read/delete and the AI services have been live-verified. No az login is needed in this mode. The instructions below also cover the preserved CLI mode.
+
 # Run the project on your computer
 
 The backend automatically loads `backend/.env` on startup. The existing Azure
