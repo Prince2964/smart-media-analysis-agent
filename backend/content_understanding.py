@@ -1,10 +1,23 @@
 """Real image extraction; never substitutes fixture content on failure."""
 import asyncio
 import os
+import re
 from urllib.parse import urlsplit
 import httpx
 from .auth import get_credential
 from .models import MediaDocument, Segment
+
+
+class AnalysisFailure(RuntimeError):
+    """Safe service failure detail suitable for the report status."""
+
+
+def failure_detail(body):
+    error = body.get('error') or {}
+    code = error.get('code', '') if isinstance(error, dict) else ''
+    # Never expose raw service messages, which may contain URLs or media text.
+    suffix = f' (code: {code})' if isinstance(code, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', code) else ''
+    return 'Azure Content Understanding could not analyze this media' + suffix + '. Try a shorter clip or a different video encoding.'
 
 
 async def analyze_image(job_id: str, name: str, data: bytes, content_type: str):
@@ -36,8 +49,8 @@ async def analyze_media(job_id: str, name: str, data: bytes, content_type: str, 
             if status == 'succeeded':
                 return normalize_video(job_id, name, body) if kind == 'video' else normalize_image(job_id, name, body)
             if status in ('failed', 'canceled'):
-                raise RuntimeError('Content Understanding analysis failed')
-        raise TimeoutError('Content Understanding analysis timed out')
+                raise AnalysisFailure(failure_detail(body))
+        raise AnalysisFailure('Azure Content Understanding is still processing after the polling limit. The report was not completed locally; try a shorter clip. The Azure operation may still be running.')
 
 
 def normalize_image(job_id: str, name: str, body: dict):

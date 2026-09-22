@@ -1,4 +1,10 @@
 import pytest
+from .content_understanding import failure_detail
+
+
+def test_failure_detail_exposes_only_safe_error_code():
+    assert 'UnsupportedMedia' in failure_detail({'error': {'code': 'UnsupportedMedia', 'message': 'private media URL'}})
+    assert 'private' not in failure_detail({'error': {'code': 'bad https://private', 'message': 'private'}})
 from .content_understanding import normalize_image
 from .main import app,jobs
 from .models import Job

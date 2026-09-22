@@ -11,7 +11,7 @@ from .models import Job, MediaDocument, DemoRequest, LinkRequest, Question, Sour
 from .processing import MockProcessor, resolve_link
 from .retrieval import LocalRetriever, FixtureAgent
 from .storage import AzureBlobStorage
-from .content_understanding import analyze_media
+from .content_understanding import analyze_media, AnalysisFailure
 from .report_editor import edit_report
 from .search_store import SearchStore
 from .job_store import save_job, load_jobs
@@ -127,7 +127,9 @@ async def process(job: Job, fail: bool = False, data: bytes | None = None, conte
         # Record only non-secret diagnostic categories, never raw service responses.
         import logging
         logging.getLogger(__name__).warning('Job %s failed in %s: %s', job.id, job.phase, type(exc).__name__)
-        if job.phase == 'Saving upload to Azure Storage':
+        if isinstance(exc, AnalysisFailure):
+            job.error = str(exc)
+        elif job.phase == 'Saving upload to Azure Storage':
             job.error = 'Saving the file to Azure Storage failed. Check the connection and storage access, then retry your file upload.'
         else:
             job.error = 'Azure media analysis failed. Please retry. Your saved reports are unaffected.'
