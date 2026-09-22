@@ -57,9 +57,11 @@ async def _edit_report(doc: MediaDocument):
     originals = [{'id':s.id,'text':clean_passage(saved.get(s.id, s.text))} for s in doc.segments]
     schema={'type':'object','additionalProperties':False,'properties':{
         'summary':{'type':'string'},'topics':{'type':'array','items':{'type':'string'}},
-        'segments':{'type':'array','items':{'type':'object','additionalProperties':False,
-            'properties':{'id':{'type':'string'},'title':{'type':'string'},'description':{'type':'string'},'transcript_hinglish':{'type':'string'}},
-            'required':['id','title','description','transcript_hinglish']}}},'required':['summary','topics','segments']}
+        'segments':{'type':'object','additionalProperties':False,
+            'properties':{s.id:{'type':'object','additionalProperties':False,
+                'properties':{'title':{'type':'string'},'description':{'type':'string'},'transcript_hinglish':{'type':'string'}},
+                'required':['title','description','transcript_hinglish']} for s in doc.segments},
+            'required':[s.id for s in doc.segments]}},'required':['summary','topics','segments']}
     headers = await asyncio.to_thread(service_headers, 'REPORT_MODEL_KEY', 'https://cognitiveservices.azure.com/.default', get_credential)
     async with httpx.AsyncClient(timeout=180) as client:
         response=await client.post(os.environ['REPORT_MODEL_ENDPOINT'].rstrip('/')+'/openai/v1/chat/completions',
@@ -83,12 +85,12 @@ async def _edit_report(doc: MediaDocument):
         result=json.loads(choice['message']['content'])
     if len(result['summary'].split())>120 or not result['summary'].strip():
         raise ValueError('Invalid summary length')
-    rows={s['id']:s for s in result['segments']}
+    rows=result['segments']
     if set(rows) != {s.id for s in doc.segments}:
         raise ValueError('Report segment IDs changed')
     doc.metadata['report_format']='compact-v2'
     doc.metadata['original_passages']=originals
-    doc.metadata['hinglish_passages']=[{'id':s['id'],'text':s['transcript_hinglish']} for s in result['segments']]
+    doc.metadata['hinglish_passages']=[{'id':sid,'text':row['transcript_hinglish']} for sid,row in rows.items()]
     doc.metadata['report_notice']='AI-generated English overview and scene notes, based on extracted content. Original transcript may contain recognition errors.'
     doc.summary=result['summary']
     doc.topics=result['topics'][:6]
