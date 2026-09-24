@@ -5,7 +5,7 @@ from typing import Protocol
 from uuid import uuid4
 from urllib.parse import urlsplit
 
-from .auth import get_credential
+from .auth import get_credential, key_mode, required_key, service_headers
 from azure.storage.blob import BlobServiceClient, ContentSettings
 
 
@@ -22,11 +22,14 @@ class AzureBlobStorage:
             raise ValueError('Use the plain HTTPS Blob service endpoint, without tokens or a container path.')
         if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{1,61})[a-z0-9]', container) or '--' in container:
             raise ValueError('Invalid container name.')
-        self.credential = get_credential(process_timeout=30)
-        self.service = BlobServiceClient(endpoint, credential=self.credential,
-                                        connection_timeout=30, read_timeout=120, retry_total=3,
-                                        max_single_put_size=4 * 1024 * 1024,
-                                        max_block_size=4 * 1024 * 1024)
+        self.credential = None if key_mode() else get_credential(process_timeout=30)
+        options = dict(connection_timeout=30, read_timeout=120, retry_total=3,
+                       max_single_put_size=4 * 1024 * 1024, max_block_size=4 * 1024 * 1024)
+        if key_mode():
+            self.service = BlobServiceClient.from_connection_string(
+                required_key('AZURE_STORAGE_CONNECTION_STRING'), **options)
+        else:
+            self.service = BlobServiceClient(endpoint, credential=self.credential, **options)
         self.container = self.service.get_container_client(container)
 
     @classmethod
@@ -55,4 +58,5 @@ class AzureBlobStorage:
 
     def close(self):
         self.service.close()
-        self.credential.close()
+        if self.credential:
+            self.credential.close()

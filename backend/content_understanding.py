@@ -4,7 +4,7 @@ import os
 import re
 from urllib.parse import urlsplit
 import httpx
-from .auth import get_credential
+from .auth import get_credential, key_mode, required_key, service_headers
 from .models import MediaDocument, Segment
 
 
@@ -30,9 +30,7 @@ async def analyze_media(job_id: str, name: str, data: bytes, content_type: str, 
     host = urlsplit(endpoint)
     if host.scheme != 'https' or not host.hostname or not host.hostname.endswith('.services.ai.azure.com') or host.query or host.path:
         raise ValueError('Invalid Content Understanding endpoint')
-    with get_credential() as credential:
-        token = await asyncio.to_thread(credential.get_token, 'https://cognitiveservices.azure.com/.default')
-    headers = {'Authorization': 'Bearer ' + token.token}
+    headers = await asyncio.to_thread(service_headers, 'CONTENT_UNDERSTANDING_KEY', 'https://cognitiveservices.azure.com/.default', get_credential, 'Ocp-Apim-Subscription-Key')
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(endpoint + f'/contentunderstanding/analyzers/{analyzer}:analyzeBinary?api-version=2025-11-01',
                                      headers={**headers, 'Content-Type': content_type}, content=data)

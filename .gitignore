@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 .venv/
+.venv-msys-backup-*/
 __pycache__/
 .pytest_cache/
 node_modules/

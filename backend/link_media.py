@@ -5,6 +5,9 @@ import socket
 import time
 from urllib.parse import urlsplit, urljoin, parse_qs
 import re
+from pathlib import Path
+import tempfile
+from .media_guardrails import run_ffmpeg, MediaRejected
 
 MAX_BYTES = 100 * 1024 * 1024
 
@@ -46,7 +49,16 @@ def normalize_link(url):
     return url, False
 
 
-def download_public(url):
+def download_public(url, audio=False):
+    try:
+        return _download_public(url, audio)
+    except (TimeoutError, socket.timeout):
+        raise LinkError('The video host stopped responding during download. Try a shorter video or upload the file directly.') from None
+    except (OSError, http.client.HTTPException):
+        raise LinkError('The connection to the video host was interrupted. Retry the link or upload the file directly.') from None
+
+
+def _download_public(url, audio=False):
     deadline = time.monotonic() + 120
     for _ in range(5):
         u = validate_url(url)
@@ -70,20 +82,43 @@ def download_public(url):
             while True:
                 if time.monotonic() > deadline:
                     raise LinkError('Video download timed out. Try a shorter video or upload the file.')
-                chunk = response.read(min(65536, MAX_BYTES + 1 - len(data)))
+                reader = getattr(response, 'read1', response.read)
+                chunk = reader(min(65536, MAX_BYTES + 1 - len(data)))
                 if not chunk:
                     break
                 data.extend(chunk)
                 if len(data) > MAX_BYTES:
                     raise LinkError('The complete video exceeds the 100 MB limit. Upload a shorter clip instead.')
             if len(data) > 16 and data[4:8] == b'ftyp':
-                return bytes(data), 'video/mp4'
+                return bytes(data), 'audio/mp4' if audio else 'video/mp4'
             if data[:4] == bytes.fromhex('1a45dfa3'):
                 return bytes(data), 'video/webm'
             raise LinkError('The link did not return a supported video file. Upload an MP4, MOV or WebM file.')
         finally:
             connection.close()
     raise LinkError('Too many redirects. Use a direct video link.')
+
+
+def media_host(url):
+    host = validate_url(url).hostname
+    if not (host == 'googlevideo.com' or host.endswith('.googlevideo.com')):
+        raise LinkError('Unsupported YouTube media host.')
+
+
+def merge_streams(video, audio):
+    if len(video) + len(audio) > MAX_BYTES:
+        raise LinkError('The complete video exceeds the 100 MB limit.')
+    with tempfile.TemporaryDirectory(prefix='media-merge-') as folder:
+        v, a, out = [Path(folder)/name for name in ('video.mp4','audio.m4a','merged.mp4')]
+        v.write_bytes(video); a.write_bytes(audio)
+        try:
+            result = run_ffmpeg(['-v','error','-i',str(v),'-i',str(a),'-map','0:v:0',
+                '-map','1:a:0','-c','copy','-movflags','+faststart','-fs',str(MAX_BYTES+1),str(out)], timeout=45)
+        except MediaRejected:
+            raise LinkError('Combining video and audio timed out. Upload the file instead.')
+        if result.returncode or not out.exists() or out.stat().st_size > MAX_BYTES:
+            raise LinkError('Could not combine this video within the upload limit. Upload a smaller MP4.')
+        return out.read_bytes(), 'video/mp4'
 
 
 def fetch_video(url):
@@ -118,8 +153,22 @@ def fetch_video(url):
                    and f.get('vcodec') not in (None, 'none') and not f.get('has_drm')]
         candidates = [f for f in formats if (f.get('filesize') or f.get('filesize_approx') or 0) <= MAX_BYTES]
         if not candidates:
-            raise LinkError('No complete video with audio is available within the 100 MB limit. Upload a shorter clip instead.')
-        chosen = max(candidates, key=lambda f: f.get('height') or 0)
+            usable = [f for f in info.get('formats', []) if f.get('protocol') == 'https' and not f.get('has_drm')]
+            videos = [f for f in usable if f.get('ext') == 'mp4' and f.get('vcodec') not in (None,'none') and f.get('acodec') == 'none']
+            audios = [f for f in usable if f.get('ext') in ('m4a','mp4') and f.get('acodec') not in (None,'none') and f.get('vcodec') == 'none']
+            pairs = [(v,a) for v in videos for a in audios if
+                (v.get('filesize') or v.get('filesize_approx') or 0) +
+                (a.get('filesize') or a.get('filesize_approx') or 0) <= MAX_BYTES]
+            if not pairs:
+                raise LinkError('No supported public video/audio download fits the 100 MB limit. Upload a shorter clip instead.')
+            v,a = min(pairs, key=lambda pair: (abs((pair[0].get('height') or 360)-360),pair[1].get('abr') or 0))
+            media_host(v['url']); media_host(a['url'])
+            video,_ = download_public(v['url'])
+            audio,_ = download_public(a['url'], audio=True)
+            data,mime = merge_streams(video,audio)
+            return (info.get('title') or 'YouTube video')[:200],data,mime
+        # Prefer a modest resolution for analysis instead of the largest available file.
+        chosen = min(candidates, key=lambda f: abs((f.get('height') or 360) - 360))
         media_url = chosen['url']
         host = validate_url(media_url).hostname
         if not (host == 'googlevideo.com' or host.endswith('.googlevideo.com')):

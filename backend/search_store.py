@@ -2,19 +2,19 @@
 import hashlib
 import os
 import httpx
-from .auth import get_credential
+from .auth import get_credential, key_mode, required_key, service_headers
 from .models import Segment
 
 class SearchStore:
     def __init__(self):
         self.endpoint=os.environ['AZURE_SEARCH_ENDPOINT'].rstrip('/')
         self.index=os.environ['AZURE_SEARCH_INDEX']
-        self.credential=get_credential()
+        self.credential=None if key_mode() else get_credential()
 
     def request(self, method, path, body=None):
-        token=self.credential.get_token('https://search.azure.com/.default').token
+        headers={'api-key': required_key('AZURE_SEARCH_KEY')} if key_mode() else {'Authorization': 'Bearer '+self.credential.get_token('https://search.azure.com/.default').token}
         response=httpx.request(method, self.endpoint+path, params={'api-version':'2024-07-01'},
-            headers={'Authorization':'Bearer '+token},json=body,timeout=30)
+            headers=headers,json=body,timeout=30)
         response.raise_for_status()
         return response.json() if response.content else {}
 

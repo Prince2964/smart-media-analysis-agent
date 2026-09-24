@@ -2,6 +2,32 @@
 
 An Azure-powered media analysis project for AI-103. Upload a video or image, or provide a supported public video link, to produce a concise report and ask questions with evidence citations.
 
+## API-key migration branch
+
+API-key mode is now active on the development laptop. Live checks passed for Storage upload/read/delete, AI Search access, generated-image extraction, report formatting, question resolution, cited model answers and web search. These checks do not establish that every video format will analyze successfully.
+
+This branch adds `AZURE_AUTH_MODE=api-key`. Set these private backend/.env values:
+
+```dotenv
+AZURE_AUTH_MODE=api-key
+AZURE_STORAGE_CONNECTION_STRING=
+CONTENT_UNDERSTANDING_KEY=
+REPORT_MODEL_KEY=
+AZURE_SEARCH_KEY=
+```
+
+Keep the existing endpoints, container, index and model deployment settings.
+Key mode uses direct Azure OpenAI for media answers and its Responses API Web Search
+for external answers; it does not call saved Foundry agents. No tenant/client IDs
+or Azure CLI login are used at runtime in this mode. Azure resource settings must
+allow key authentication, and firewall rules still apply. Network access, quotas,
+and secret validity can differ on another laptop.
+
+Rollback: the `foundry-before-api-keys` Git tag preserves the Foundry implementation.
+The private original `.env` is backed up locally under
+`.local/backups/foundry-before-api-keys/backend.env` (not on GitHub).
+Restore that code and private configuration to return to the previous setup.
+
 ## Current status
 
 The React frontend and FastAPI backend run locally. Analysis, storage, retrieval, model calls and optional web search use Azure online services. This is not an offline AI model and is not yet a publicly hosted website.
@@ -220,3 +246,31 @@ Live tests may require Azure permissions and incur service usage. Unit tests do 
 ## Remaining production work
 
 Public Azure hosting, user login and report ownership, shared durable job storage, background job recovery, monitoring, retention/deletion controls, and broader retrieval-quality evaluation. No custom model training has been performed; the project uses pretrained Azure models with retrieval and instructions.
+
+## Upload screening and public video links
+
+With `MEDIA_GUARDRAILS=azure`, files and downloaded links share a screening pipeline.
+Images must decode successfully. Videos must contain a readable video stream, be
+no longer than 20 minutes and fit the 100 MB limit. FFmpeg is supplied through
+`imageio-ffmpeg`; install the updated backend requirements on each laptop.
+
+Azure Content Safety screens resized images or sampled video frames (approximately
+one frame every ten seconds), then extracted text before Blob/report persistence
+and indexing. Medium or high severity (4 or 6) in Hate, Sexual, SelfHarm or Violence
+blocks processing. Missing/incomplete safety results and service errors stop the
+job rather than approve it. The existing CU resource/key is used unless optional
+`CONTENT_SAFETY_ENDPOINT` and `CONTENT_SAFETY_KEY` are configured.
+
+This is sampled screening, not exhaustive video moderation or antivirus scanning.
+Brief content between samples and speech missed by extraction may be missed.
+Educational/news context may also produce false positives. Screening adds Azure
+requests, latency and cost. Existing saved reports are not retroactively screened.
+Media is sent to Azure for screening/extraction; rejected reports are not persisted
+or indexed by the application.
+
+YouTube downloads now support separate direct HTTPS MP4 video and M4A audio streams
+merged locally without re-encoding. Combined download and output must fit 100 MB.
+Private, DRM-protected, restricted or blocked videos and unsupported streaming
+formats still require an authorized file upload. Arbitrary website pages are not
+supported; direct MP4/MOV/WebM URLs remain supported. Public-network URL checks
+and bounded downloads remain in place.

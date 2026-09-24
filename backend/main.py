@@ -1,7 +1,11 @@
 import asyncio
 import io
 import os
+import re
+from fastapi import Header
+from fastapi.responses import StreamingResponse
 from .config import load_backend_env
+from .auth import key_mode
 from time import perf_counter
 from contextlib import asynccontextmanager, contextmanager
 from uuid import uuid4, UUID
@@ -17,6 +21,7 @@ from .search_store import SearchStore
 from .job_store import save_job, load_jobs
 from .foundry_agent import answer_question
 from .web_answers import answer_with_fallback
+from .media_guardrails import screen_media, screen_text, MediaRejected
 from .link_media import normalize_link, fetch_video, LinkError
 
 jobs: dict[str, Job] = {}
@@ -61,7 +66,8 @@ async def lifespan(app):
         storage.close()
         storage = None
     if search_store:
-        search_store.credential.close()
+        if search_store.credential:
+            search_store.credential.close()
         search_store = None
 
 app = FastAPI(title='Smart Media Analysis Agent — local mock API', lifespan=lifespan)
@@ -82,12 +88,15 @@ async def process(job: Job, fail: bool = False, data: bytes | None = None, conte
         job.status = 'processing'
         if link_url:
             with timed_phase(job, 'download', 'Downloading video from link'):
-                name, data, content_type = await asyncio.wait_for(asyncio.to_thread(fetch_video, link_url), timeout=180)
+                try:
+                    name, data, content_type = await asyncio.wait_for(asyncio.to_thread(fetch_video, link_url), timeout=180)
+                except TimeoutError:
+                    raise LinkError('The video download exceeded the time limit. Try a shorter clip or upload the video file directly.') from None
                 job.source_name = name
                 job.source_type = 'video'
-        if storage and data is not None:
-            with timed_phase(job, 'upload', 'Saving upload to Azure Storage'):
-                job.storage_blob = await asyncio.to_thread(storage.upload, data, content_type)
+        if data is not None:
+            with timed_phase(job, 'screening', 'Checking file and sampled frames'):
+                await asyncio.to_thread(screen_media, data, job.source_type)
         for stage in range(1, 4):
             job.stage = stage
             if data is None:
@@ -97,6 +106,11 @@ async def process(job: Job, fail: bool = False, data: bytes | None = None, conte
         if data is not None and (job.source_type == 'image' or os.getenv('PROCESSING_MODE') == 'azure-media') and os.getenv('PROCESSING_MODE') in ('azure-image', 'azure-media'):
             with timed_phase(job, 'analysis', 'Analyzing media in Azure'):
                 job.document = await analyze_media(job.id, job.source_name, data, content_type, job.source_type)
+            with timed_phase(job, 'text_screening', 'Checking extracted content'):
+                await asyncio.to_thread(screen_text, job.document.extracted_text)
+            if storage:
+                with timed_phase(job, 'upload', 'Saving upload to Azure Storage'):
+                    job.storage_blob = await asyncio.to_thread(storage.upload, data, content_type)
             if os.getenv('REPORT_MODEL_ENDPOINT'):
                 try:
                     with timed_phase(job, 'formatting', 'Preparing summary, topics and readable transcript'):
@@ -104,6 +118,9 @@ async def process(job: Job, fail: bool = False, data: bytes | None = None, conte
                 except Exception:
                     job.document.metadata['report_notice'] = 'Compact report generation failed. Original extraction is shown.'
         else:
+            if storage and data is not None:
+                with timed_phase(job, 'upload', 'Saving upload to Azure Storage'):
+                    job.storage_blob = await asyncio.to_thread(storage.upload, data, content_type)
             job.document = processor.analyze(job.id, job.source_type, job.source_name)
         if link_url:
             job.document.metadata['input_method'] = 'public-video-link'
@@ -117,6 +134,11 @@ async def process(job: Job, fail: bool = False, data: bytes | None = None, conte
         job.stage = 4
         job.status = 'complete'
         job.phase = 'Report ready'
+    except MediaRejected as exc:
+        job.document = None
+        job.error = str(exc)
+        job.status = 'failed'
+        job.phase = 'Media checks stopped processing'
     except LinkError as exc:
         job.error = str(exc)
         job.status = 'failed'
@@ -172,8 +194,8 @@ def get_document(job_id: str):
 @app.get('/api/health')
 def health():
     return {'mode': os.getenv('PROCESSING_MODE', 'mock'), 'azure_connected': storage is not None or search_store is not None,
-            'agent': 'foundry-agent' if os.getenv('FOUNDRY_AGENT_NAME') else 'local-fixture',
-            'agent_configured': bool(os.getenv('FOUNDRY_AGENT_NAME')),
+            'agent': 'azure-openai' if key_mode() else 'foundry-agent' if os.getenv('FOUNDRY_AGENT_NAME') else 'local-fixture',
+            'agent_configured': bool(os.getenv('REPORT_MODEL_KEY')) if key_mode() else bool(os.getenv('FOUNDRY_AGENT_NAME')),
             'storage': 'azure' if storage else 'discard', 'blob_access_verified': storage_verified}
 
 @app.get('/api/reports')
@@ -241,6 +263,47 @@ async def upload(source_type: SourceType = Form(...), file: UploadFile = File(..
 def status(job_id: str):
     return get_job(job_id)
 
+
+@app.get('/api/jobs/{job_id}/media')
+def saved_media(job_id: str, range_header: str | None = Header(None, alias='Range')):
+    job = get_job(job_id)
+    if job.status != 'complete' or not job.storage_blob or not storage:
+        raise HTTPException(404, 'Saved media is not available.')
+    # Blob identity comes only from the stored job, never a caller-supplied path.
+    if not re.fullmatch(r'media/[0-9a-f]{32}', job.storage_blob):
+        raise HTTPException(404, 'Saved media is not available.')
+    try:
+        blob = storage.container.get_blob_client(job.storage_blob)
+        properties = blob.get_blob_properties()
+        size = properties.size
+        start, end = 0, size - 1
+        if range_header:
+            match = re.fullmatch(r'bytes=(\d*)-(\d*)', range_header)
+            if not match or not any(match.groups()):
+                raise HTTPException(416, headers={'Content-Range':f'bytes */{size}'})
+            left, right = match.groups()
+            if left:
+                start = int(left)
+                end = min(int(right), end) if right else end
+            else:
+                start = max(0, size - int(right))
+            if start > end or start >= size:
+                raise HTTPException(416, headers={'Content-Range':f'bytes */{size}'})
+        download = blob.download_blob(offset=start, length=end-start+1)
+        headers = {'Accept-Ranges':'bytes', 'Content-Length':str(end-start+1),
+                   'Cache-Control':'private, no-store', 'X-Content-Type-Options':'nosniff'}
+        if range_header:
+            headers['Content-Range'] = f'bytes {start}-{end}/{size}'
+        mime = properties.content_settings.content_type
+        if mime not in ('video/mp4','video/quicktime','video/webm','image/png','image/jpeg','image/webp'):
+            mime = 'application/octet-stream'
+        return StreamingResponse(download.chunks(), status_code=206 if range_header else 200,
+                                 media_type=mime, headers=headers)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(503, 'Saved media could not be loaded from Storage.')
+
 report_repairs: set[str] = set()
 
 @app.post('/api/jobs/{job_id}/format-report')
@@ -302,7 +365,7 @@ def ask(job_id: str, request: Question):
         raise HTTPException(422, 'Enter a question.')
     document = get_document(job_id)
     if not document.is_mock:
-        if not search_store or not os.getenv('FOUNDRY_AGENT_NAME'):
+        if not search_store or not (os.getenv('REPORT_MODEL_KEY') if key_mode() else os.getenv('FOUNDRY_AGENT_NAME')):
             raise HTTPException(409, 'Media chat is not configured on this server.')
         try:
             if document.metadata.get('search_provider') != 'azure-ai-search':
