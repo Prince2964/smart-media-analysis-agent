@@ -38,3 +38,5 @@ uvicorn==0.53.0
 
 yt-dlp==2026.8.19
 python-dotenv==1.2.1
+
+imageio-ffmpeg==0.6.0

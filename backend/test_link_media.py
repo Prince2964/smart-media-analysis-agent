@@ -4,6 +4,26 @@ from . import link_media as links
 def test_youtube_normalization():
     assert links.normalize_link('https://youtu.be/BwMEA-bEOEU?si=tracking') == ('https://www.youtube.com/watch?v=BwMEA-bEOEU',True)
 
+
+def test_network_timeout_is_actionable_link_error(monkeypatch):
+    def stalled(*args): raise TimeoutError('private host details')
+    monkeypatch.setattr(links,'_download_public',stalled)
+    with pytest.raises(links.LinkError,match='host stopped responding') as error:
+        links.download_public('https://example.com/clip.mp4')
+    assert 'private' not in str(error.value)
+
+
+def test_download_timeout_is_not_reported_as_azure_failure(monkeypatch):
+    import asyncio
+    from . import main
+    from .models import Job
+    def stalled(*args): raise TimeoutError()
+    monkeypatch.setattr(main,'fetch_video',stalled)
+    job=Job(id='timeout',source_type='link',source_name='Video from link')
+    asyncio.run(main.process(job,link_url='https://example.com/clip.mp4'))
+    assert job.phase=='Link could not be analyzed'
+    assert 'download exceeded' in job.error
+
 @pytest.mark.parametrize('url',['file:///secret','http://example.com/a.mp4','https://user:pass@example.com/a.mp4','https://example.com:8443/a.mp4','https://youtube.com/playlist?list=abc','https://example.com/page'])
 def test_invalid_urls(url):
     with pytest.raises(links.LinkError): links.normalize_link(url)
@@ -51,3 +71,22 @@ def test_link_pipeline_uses_downloaded_bytes_for_real_analysis(monkeypatch):
     assert job.status=='complete'
     assert not job.document.is_mock
     assert job.document.metadata['input_method']=='public-video-link'
+
+
+def test_youtube_separate_streams_are_merged(monkeypatch):
+    import yt_dlp
+    class FakeYoutube:
+        def __init__(self,*args,**kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+        def extract_info(self,*args,**kwargs):
+            return {'title':'Clip','formats':[
+                {'protocol':'https','ext':'mp4','vcodec':'h264','acodec':'none','height':360,'url':'https://r.googlevideo.com/v'},
+                {'protocol':'https','ext':'m4a','vcodec':'none','acodec':'aac','url':'https://r.googlevideo.com/a'}]}
+    monkeypatch.setattr(yt_dlp,'YoutubeDL',FakeYoutube)
+    monkeypatch.setattr(links,'download_public',lambda url,audio=False:(b'audio' if audio else b'video','video/mp4'))
+    def merge(v,a):
+        assert v==b'video' and a==b'audio'
+        return b'combined','video/mp4'
+    monkeypatch.setattr(links,'merge_streams',merge)
+    assert links.fetch_video('https://youtu.be/BwMEA-bEOEU')==('Clip',b'combined','video/mp4')

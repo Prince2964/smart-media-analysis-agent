@@ -246,3 +246,31 @@ Live tests may require Azure permissions and incur service usage. Unit tests do 
 ## Remaining production work
 
 Public Azure hosting, user login and report ownership, shared durable job storage, background job recovery, monitoring, retention/deletion controls, and broader retrieval-quality evaluation. No custom model training has been performed; the project uses pretrained Azure models with retrieval and instructions.
+
+## Upload screening and public video links
+
+With `MEDIA_GUARDRAILS=azure`, files and downloaded links share a screening pipeline.
+Images must decode successfully. Videos must contain a readable video stream, be
+no longer than 20 minutes and fit the 100 MB limit. FFmpeg is supplied through
+`imageio-ffmpeg`; install the updated backend requirements on each laptop.
+
+Azure Content Safety screens resized images or sampled video frames (approximately
+one frame every ten seconds), then extracted text before Blob/report persistence
+and indexing. Medium or high severity (4 or 6) in Hate, Sexual, SelfHarm or Violence
+blocks processing. Missing/incomplete safety results and service errors stop the
+job rather than approve it. The existing CU resource/key is used unless optional
+`CONTENT_SAFETY_ENDPOINT` and `CONTENT_SAFETY_KEY` are configured.
+
+This is sampled screening, not exhaustive video moderation or antivirus scanning.
+Brief content between samples and speech missed by extraction may be missed.
+Educational/news context may also produce false positives. Screening adds Azure
+requests, latency and cost. Existing saved reports are not retroactively screened.
+Media is sent to Azure for screening/extraction; rejected reports are not persisted
+or indexed by the application.
+
+YouTube downloads now support separate direct HTTPS MP4 video and M4A audio streams
+merged locally without re-encoding. Combined download and output must fit 100 MB.
+Private, DRM-protected, restricted or blocked videos and unsupported streaming
+formats still require an authorized file upload. Arbitrary website pages are not
+supported; direct MP4/MOV/WebM URLs remain supported. Public-network URL checks
+and bounded downloads remain in place.
