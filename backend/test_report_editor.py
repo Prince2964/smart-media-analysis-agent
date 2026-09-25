@@ -1,6 +1,46 @@
 import asyncio
+import json
+import pytest
 from . import report_editor as editor
 from .models import MediaDocument, Segment
+
+
+@pytest.mark.parametrize('changed_timestamp', [False, True])
+def test_hinglish_repair_preserves_report_and_validates_timestamps(monkeypatch, changed_timestamp):
+    original = "Host introduces the news.\n00:00.110 --> 00:02.990\nWhat a big week this has been."
+    text = '00:00.110 --> 00:02.990\nYeh hafta kitna bada raha hai.'
+    if changed_timestamp:
+        text = text.replace('00:02.990', '00:03.990')
+    segment = Segment(id='s1', label='News', text='English scene description', start=0.11, end=2.99)
+    doc = MediaDocument(id='test', source_type='video', source_name='clip', sample_name='',
+                        summary='Keep summary', topics=['News'], extracted_text=original,
+                        segments=[segment], chunks=[segment],
+                        metadata={'original_passages':[{'id':'s1','text':original}]})
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {'choices':[{'finish_reason':'stop','message':{'content':json.dumps({'s1':text})}}]}
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, url, **kwargs):
+            assert 'translate English' in kwargs['json']['messages'][0]['content']
+            assert json.loads(kwargs['json']['messages'][1]['content']) == {'s1':original}
+            return Response()
+    monkeypatch.setattr(editor.httpx, 'AsyncClient', Client)
+    monkeypatch.setattr(editor, 'service_headers', lambda *args: {})
+    monkeypatch.setenv('REPORT_MODEL_ENDPOINT', 'https://example.invalid')
+    monkeypatch.setenv('REPORT_MODEL_DEPLOYMENT', 'test')
+    before = doc.model_dump()
+    if changed_timestamp:
+        with pytest.raises(ValueError, match='timestamps changed'):
+            asyncio.run(editor.update_hinglish(doc))
+    else:
+        result = asyncio.run(editor.update_hinglish(doc))
+        assert result.metadata.pop('hinglish_passages') == [{'id':'s1','text':text}]
+        assert result.model_dump() == before
+    assert doc.model_dump() == before
 
 
 def test_retry_does_not_mutate_original(monkeypatch):
