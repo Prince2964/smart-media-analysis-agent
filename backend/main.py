@@ -16,7 +16,7 @@ from .processing import MockProcessor, resolve_link
 from .retrieval import LocalRetriever, FixtureAgent
 from .storage import AzureBlobStorage
 from .content_understanding import analyze_media, AnalysisFailure
-from .report_editor import edit_report
+from .report_editor import edit_report, update_hinglish
 from .search_store import SearchStore
 from .job_store import save_job, load_jobs
 from .foundry_agent import answer_question
@@ -305,6 +305,25 @@ def saved_media(job_id: str, range_header: str | None = Header(None, alias='Rang
         raise HTTPException(503, 'Saved media could not be loaded from Storage.')
 
 report_repairs: set[str] = set()
+
+@app.post('/api/jobs/{job_id}/hinglish')
+async def repair_hinglish(job_id: str):
+    document = get_document(job_id)
+    if document.is_mock or document.source_type != 'video' or not os.getenv('REPORT_MODEL_ENDPOINT'):
+        raise HTTPException(409, 'Hinglish conversion is not available for this report.')
+    if job_id in report_repairs:
+        raise HTTPException(409, 'This report is already being updated. Please wait.')
+    report_repairs.add(job_id)
+    try:
+        edited = await update_hinglish(document)
+        job = get_job(job_id)
+        job.document = edited
+        await asyncio.to_thread(save_job, job)
+        return job
+    except Exception:
+        raise HTTPException(503, 'Hinglish conversion could not finish. Your saved report is unchanged; please retry.')
+    finally:
+        report_repairs.discard(job_id)
 
 @app.post('/api/jobs/{job_id}/format-report')
 async def format_report(job_id: str):
